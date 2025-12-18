@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deteksi Objek & Warna Sangat Akurat - TensorFlow.js</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    
+    <style>
+        body { 
+            margin: 0; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            font-family: sans-serif; 
+            background-color: #f4f4f4;
+        }
+        h1 { color: #2c3e50; }
+        #container { 
+            position: relative; 
+            border: 4px solid #3498db; 
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
+        }
+        #canvas { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+        }
+        #webcam {
+            display: block;
+        }
+        #status { 
+            margin-top: 15px; 
+            font-weight: bold; 
+            color: #e74c3c; 
+            padding: 10px;
+            background-color: #fff;
+            border-radius: 5px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Deteksi Objek & Warna Akurat (Refined HSL) 🔬</h1>
+    
+    <div id="container">
+        <video id="webcam" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <p id="status">Memuat model COCO-SSD...</p>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusElement = document.getElementById('status');
+        let model = undefined;
+        
+        // Objek dengan kepercayaan di bawah 65% akan diabaikan
+        const MIN_CONFIDENCE = 0.65; 
+
+        // --- FUNGSI 1: KONVERSI RGB ke HSL ---
+        function rgbToHsl(r, g, b) {
+            r /= 255; g /= 255; b /= 255;
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            let h, s, l = (max + min) / 2;
+
+            if (max === min) { h = s = 0; } 
+            else {
+                const d = max - min;
+                s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                switch (max) {
+                    case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                    case g: h = (b - r) / d + 2; break;
+                    case b: h = (r - g) / d + 4; break;
+                }
+                h /= 6;
+            }
+            return [h * 360, s, l]; 
+        }
+
+        // --- FUNGSI 2: ANALISIS WARNA SANGAT AKURAT BERBASIS HSL ---
+        function getAverageColor(x, y, width, height) {
+            if (width <= 0 || height <= 0) return "Tidak Valid";
+
+            let imageData;
+            try {
+                const safeX = Math.max(0, x);
+                const safeY = Math.max(0, y);
+                const safeW = Math.min(width, canvas.width - safeX);
+                const safeH = Math.min(height, canvas.height - safeY);
+                
+                // Ambil data piksel
+                imageData = ctx.getImageData(safeX, safeY, safeW, safeH);
+            } catch (e) {
+                return "Warna?";
+            }
+
+            const data = imageData.data;
+            let totalR = 0, totalG = 0, totalB = 0;
+            const step = 5; // Sampling piksel untuk performa
+            let count = 0;
+
+            for (let i = 0; i < data.length; i += 4 * step) {
+                totalR += data[i];
+                totalG += data[i + 1];
+                totalB += data[i + 2];
+                count++;
+            }
+
+            if (count === 0) return "Kosong";
+
+            const avgR = totalR / count;
+            const avgG = totalG / count;
+            const avgB = totalB / count;
+
+            const [h, s, l] = rgbToHsl(avgR, avgG, avgB);
+
+            // --- 1. KLASIFIKASI MONOKROMATIK (PUTIH, HITAM, ABU-ABU) ---
+            if (s < 0.15) { 
+                if (l > 0.9) return "Putih";
+                if (l < 0.1) return "Hitam";
+                return "Abu-abu";
+            }
+            
+            // --- 2. KLASIFIKASI WARNA SULIT (COKLAT, ZAITUN) ---
+            
+            // Coklat (Brown): Saturation sedang, Lightness rendah hingga menengah, Hue di Oranye/Merah
+            if (s > 0.2 && s < 0.7 && l > 0.15 && l < 0.55) {
+                if (h >= 10 && h < 50) return "Coklat"; 
+            }
+            
+            // Zaitun (Olive): Saturation sedang, Lightness rendah hingga menengah, Hue di Kuning/Hijau
+            if (s > 0.2 && s < 0.7 && l > 0.15 && l < 0.55) {
+                 if (h >= 60 && h < 90) return "Zaitun"; 
+            }
+
+            // --- 3. KLASIFIKASI WARNA UTAMA (Berdasarkan Hue) ---
+            
+            // Merah
+            if (h >= 345 || h < 15) return "Merah"; 
+            // Oranye
+            if (h >= 15 && h < 40) return "Oranye"; 
+            // Kuning
+            if (h >= 40 && h < 75) return "Kuning"; 
+            // Hijau
+            if (h >= 75 && h < 150) return "Hijau"; 
+            // Cyan
+            if (h >= 150 && h < 200) return "Cyan"; 
+            // Biru
+            if (h >= 200 && h < 260) return "Biru"; 
+            // Ungu/Magenta
+            if (h >= 260 && h < 345) return "Ungu"; 
+            
+            return "Lainnya";
+        }
+
+        // --- FUNGSI 3: AKSES KAMERA ---
+        async function setupWebcam() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                await new Promise(r => video.addEventListener('loadeddata', r, { once: true }));
+                return stream;
+            } catch (error) {
+                console.error("Gagal mendapatkan akses kamera:", error);
+                throw new Error("Gagal mendapatkan akses kamera. Pastikan Anda menjalankan melalui server lokal (localhost/HTTPS) dan memberikan izin.");
+            }
+        }
+
+        // --- FUNGSI 4: LOOP DETEKSI UTAMA ---
+        async function detectFrame() {
+            if (video.readyState < 2 || !model) {
+                requestAnimationFrame(detectFrame);
+                return;
+            }
+            
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const rawPredictions = await model.detect(video);
+
+            // Filter hasil berdasarkan ambang batas kepercayaan (MIN_CONFIDENCE)
+            const predictions = rawPredictions.filter(p => p.score >= MIN_CONFIDENCE);
+            
+            drawBoundingBoxes(predictions);
+
+            requestAnimationFrame(detectFrame);
+        }
+
+        // --- FUNGSI 5: MENGGAMBAR HASIL (Warna Font Disesuaikan) ---
+        function drawBoundingBoxes(predictions) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.font = '18px Arial'; 
+            ctx.lineWidth = 3; 
+            
+            predictions.forEach(prediction => {
+                const [x, y, width, height] = prediction.bbox;
+                
+                const avgColor = getAverageColor(x, y, width, height);
+
+                const confidence = Math.round(prediction.score * 100);
+                const text = `${prediction.class} (${avgColor}, ${confidence}%)`;
+                
+                // 1. Tentukan Warna Garis dan Latar Belakang Kotak (Stroke Color)
+                let strokeColor = '#95a5a6'; 
+                let isLightColor = false; // Untuk menentukan warna font
+
+                if (avgColor === "Merah") strokeColor = '#c0392b';
+                else if (avgColor === "Kuning") { strokeColor = '#f1c40f'; isLightColor = true; }
+                else if (avgColor === "Hijau") strokeColor = '#27ae60';
+                else if (avgColor === "Biru") strokeColor = '#2980b9';
+                else if (avgColor === "Putih") { strokeColor = '#ecf0f1'; isLightColor = true; }
+                else if (avgColor === "Abu-abu") strokeColor = '#95a5a6';
+                else if (avgColor === "Hitam") strokeColor = '#34495e'; 
+                else if (avgColor === "Oranye") strokeColor = '#e67e22';
+                else if (avgColor === "Coklat") strokeColor = '#8b4513';
+                else if (avgColor === "Zaitun") strokeColor = '#808000';
+
+                
+                ctx.strokeStyle = strokeColor;
+                ctx.strokeRect(x, y, width, height);
+                
+                // 2. Gambar kotak latar belakang teks
+                ctx.fillStyle = strokeColor;
+                const textWidth = ctx.measureText(text).width;
+                ctx.fillRect(x - 1, y - 24, textWidth + 10, 24); 
+                
+                // 3. Gambar teks (Font selalu Hitam kecuali latar belakang terlalu gelap)
+                ctx.fillStyle = (isLightColor || avgColor === "Kuning" || avgColor === "Putih") ? '#000000' : '#FFFFFF';
+                
+                ctx.fillText(text, x + 4, y - 6);
+            });
+        }
+
+        // --- FUNGSI UTAMA UNTUK MEMULAI ---
+        async function startApp() {
+            try {
+                statusElement.textContent = `1. Memuat model COCO-SSD... (Confidence > ${MIN_CONFIDENCE * 100}%)`;
+                model = await cocoSsd.load();
+                statusElement.style.color = '#3498db';
+                statusElement.textContent = '2. Model berhasil dimuat. Meminta akses kamera...';
+
+                await setupWebcam();
+                
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                video.width = video.videoWidth;
+                video.height = video.videoHeight;
+                document.getElementById('container').style.width = `${video.videoWidth}px`;
+                document.getElementById('container').style.height = `${video.videoHeight}px`;
+
+                statusElement.style.color = '#2ecc71';
+                statusElement.textContent = '3. Deteksi dan Analisis Warna Sangat Akurat Dimulai.';
+                
+                detectFrame();
+                
+            } catch (error) {
+                statusElement.style.color = '#e74c3c';
+                statusElement.textContent = `❌ ERROR: ${error.message}. SILAKAN CEK KONTAK ATAU JALANKAN DI SERVER LOKAL.`;
+                console.error(error);
+            }
+        }
+
+        startApp();
+    </script>
+
+</body>
+</html>
